@@ -20,20 +20,17 @@ package org.apache.rocketmq.mqtt.cs.protocol.mqtt5;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelHandlerContext;
-import io.netty.channel.SimpleChannelInboundHandler;
 import io.netty.handler.codec.mqtt.MqttConnectMessage;
 import io.netty.handler.codec.mqtt.MqttMessage;
 import io.netty.handler.codec.mqtt.MqttPublishMessage;
 import io.netty.handler.codec.mqtt.MqttSubscribeMessage;
 import io.netty.handler.codec.mqtt.MqttUnsubscribeMessage;
-import io.netty.util.ReferenceCountUtil;
 import org.apache.rocketmq.mqtt.common.hook.HookResult;
 import org.apache.rocketmq.mqtt.common.hook.UpstreamHookManager;
 import org.apache.rocketmq.mqtt.common.model.MqttMessageUpContext;
 import org.apache.rocketmq.mqtt.common.util.HostInfo;
-import org.apache.rocketmq.mqtt.cs.channel.ChannelDecodeException;
-import org.apache.rocketmq.mqtt.cs.channel.ChannelException;
 import org.apache.rocketmq.mqtt.cs.channel.ChannelInfo;
+import org.apache.rocketmq.mqtt.cs.protocol.AbstractMqttPacketDispatcher;
 import org.apache.rocketmq.mqtt.cs.protocol.mqtt5.handler.Mqtt5AuthHandler;
 import org.apache.rocketmq.mqtt.cs.protocol.mqtt5.handler.Mqtt5ConnectHandler;
 import org.apache.rocketmq.mqtt.cs.protocol.mqtt5.handler.Mqtt5DisconnectHandler;
@@ -50,12 +47,11 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.Resource;
-import java.util.concurrent.CompletableFuture;
 
 
 @ChannelHandler.Sharable
 @Component
-public class Mqtt5PacketDispatcher extends SimpleChannelInboundHandler<MqttMessage> {
+public class Mqtt5PacketDispatcher extends AbstractMqttPacketDispatcher {
     private static Logger logger = LoggerFactory.getLogger(Mqtt5PacketDispatcher.class);
 
     @Resource
@@ -95,58 +91,17 @@ public class Mqtt5PacketDispatcher extends SimpleChannelInboundHandler<MqttMessa
     private UpstreamHookManager upstreamHookManager;
 
     @Override
-    protected void channelRead0(ChannelHandlerContext ctx, MqttMessage msg) {
-        if (!ctx.channel().isActive()) {
-            return;
-        }
-        if (!msg.decoderResult().isSuccess()) {
-            throw new ChannelDecodeException(ChannelInfo.getClientId(ctx.channel()) + "," + msg.decoderResult());
-        }
-        ChannelInfo.touch(ctx.channel());
-        boolean preResult = preHandler(ctx, msg);
-        if (!preResult) {
-            return;
-        }
-        CompletableFuture<HookResult> upstreamHookResult;
-        try {
-            if (msg instanceof MqttPublishMessage) {
-                ((MqttPublishMessage) msg).retain();
-            }
-            upstreamHookResult = upstreamHookManager.doUpstreamHook(buildMqttMessageUpContext(ctx), msg);
-            if (upstreamHookResult == null) {
-                _channelRead0(ctx, msg, null);
-                return;
-            }
-        } catch (Throwable t) {
-            logger.error("", t);
-            if (msg instanceof MqttPublishMessage) {
-                ReferenceCountUtil.release(msg);
-            }
-            throw new ChannelException(t.getMessage());
-        }
-        upstreamHookResult.whenComplete((hookResult, throwable) -> {
-            if (msg instanceof MqttPublishMessage) {
-                ReferenceCountUtil.release(msg);
-            }
-            if (throwable != null) {
-                logger.error("", throwable);
-                ctx.fireExceptionCaught(new ChannelException(throwable.getMessage()));
-                return;
-            }
-            if (hookResult == null) {
-                ctx.fireExceptionCaught(new ChannelException("UpstreamHook Result Unknown"));
-                return;
-            }
-            try {
-                _channelRead0(ctx, msg, hookResult);
-            } catch (Throwable t) {
-                logger.error("", t);
-                ctx.fireExceptionCaught(new ChannelException(t.getMessage()));
-            }
-        });
+    protected Logger logger() {
+        return logger;
     }
 
-    private void _channelRead0(ChannelHandlerContext ctx, MqttMessage msg, HookResult upstreamHookResult) {
+    @Override
+    protected UpstreamHookManager upstreamHookManager() {
+        return upstreamHookManager;
+    }
+
+    @Override
+    protected void doChannelRead(ChannelHandlerContext ctx, MqttMessage msg, HookResult upstreamHookResult) {
         switch (msg.fixedHeader().messageType()) {
             case CONNECT:
                 mqtt5ConnectHandler.doHandler(ctx, (MqttConnectMessage) msg, upstreamHookResult);
@@ -185,7 +140,8 @@ public class Mqtt5PacketDispatcher extends SimpleChannelInboundHandler<MqttMessa
         }
     }
 
-    private boolean preHandler(ChannelHandlerContext ctx, MqttMessage msg) {
+    @Override
+    protected boolean preHandler(ChannelHandlerContext ctx, MqttMessage msg) {
         switch (msg.fixedHeader().messageType()) {
             case CONNECT:
                 return mqtt5ConnectHandler.preHandler(ctx, (MqttConnectMessage) msg);
@@ -212,7 +168,8 @@ public class Mqtt5PacketDispatcher extends SimpleChannelInboundHandler<MqttMessa
         }
     }
 
-    public MqttMessageUpContext buildMqttMessageUpContext(ChannelHandlerContext ctx) {
+    @Override
+    protected MqttMessageUpContext buildMqttMessageUpContext(ChannelHandlerContext ctx) {
         MqttMessageUpContext context = new MqttMessageUpContext();
         Channel channel = ctx.channel();
         context.setClientId(ChannelInfo.getClientId(channel));
